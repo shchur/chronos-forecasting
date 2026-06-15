@@ -12,11 +12,11 @@ import pandas.api.types as ptypes
 
 
 def normalize_df(
-    df: "pd.DataFrame",
+    df: pd.DataFrame,
     id_column: str = "item_id",
     timestamp_column: str = "timestamp",
     order: "np.ndarray | None" = None,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """
     Return a df with the timestamp column coerced to datetime, rows grouped by id (in
     first-appearance order, or `order` if given), and sorted by timestamp within each group.
@@ -44,7 +44,7 @@ def normalize_df(
 
 
 def infer_freq_from_df(
-    df: "pd.DataFrame",
+    df: pd.DataFrame,
     id_column: str = "item_id",
     timestamp_column: str = "timestamp",
 ) -> str:
@@ -84,12 +84,12 @@ def infer_freq_from_df(
 
 
 def make_future_dataframe(
-    df: "pd.DataFrame",
+    df: pd.DataFrame,
     prediction_length: int,
     freq: "str | None" = None,
     id_column: str = "item_id",
     timestamp_column: str = "timestamp",
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """
     Build the forecast-horizon timestamps for each series in a normalized df.
 
@@ -116,11 +116,7 @@ def make_future_dataframe(
         # Silence PerformanceWarning for non-vectorized offsets (e.g. BusinessDay)
         # https://github.com/pandas-dev/pandas/blob/95624ca2e99b0/pandas/core/arrays/datetimes.py#L822
         warnings.simplefilter("ignore", category=pd.errors.PerformanceWarning)
-        # Stack offsets into shape (n_series, prediction_length) then ravel to row-major
-        # (item 0's horizon first, ascending), matching np.repeat(item_ids, prediction_length).
-        future_ts = np.stack(
-            [last_ts + step * offset for step in range(1, prediction_length + 1)], axis=1
-        ).ravel()
+        future_ts = np.stack([last_ts + step * offset for step in range(1, prediction_length + 1)], axis=1).ravel()
 
     return pd.DataFrame(
         {
@@ -132,11 +128,11 @@ def make_future_dataframe(
 
 def _validate_df_types_and_cast(
     df: pd.DataFrame,
-    future_df: "pd.DataFrame | None",
+    future_df: pd.DataFrame | None,
     target_columns: list[str],
     id_column: str = "item_id",
     timestamp_column: str = "timestamp",
-) -> tuple[pd.DataFrame, "pd.DataFrame | None"]:
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     astype_dict = {}
     future_astype_dict = {}
     for col in df.columns.drop([id_column, timestamp_column]):
@@ -173,12 +169,12 @@ def _validate_df_types_and_cast(
 
 def validate_df_inputs(
     df: pd.DataFrame,
-    future_df: "pd.DataFrame | None",
+    future_df: pd.DataFrame | None,
     target_columns: list[str],
     prediction_length: int,
     id_column: str = "item_id",
     timestamp_column: str = "timestamp",
-) -> tuple[pd.DataFrame, "pd.DataFrame | None", str, list[int], np.ndarray]:
+) -> tuple[pd.DataFrame, pd.DataFrame | None, str, list[int], np.ndarray]:
     """
     Validates and prepares dataframe inputs
 
@@ -310,7 +306,7 @@ def validate_df_inputs(
 
 def convert_df_input_to_list_of_dicts_input(
     df: pd.DataFrame,
-    future_df: "pd.DataFrame | None",
+    future_df: pd.DataFrame | None,
     target_columns: list[str],
     prediction_length: int,
     id_column: str = "item_id",
