@@ -944,16 +944,15 @@ class Chronos2Pipeline(BaseChronosPipeline):
         as_univariate: bool,
         **predict_kwargs,
     ) -> tuple["datasets.DatasetDict", float]:
-        import datasets
         import fev
 
-        from chronos.chronos2.dataset import convert_fev_window_to_list_of_dicts_input
+        past_df, future_df, target = self._fev_window_to_dataframes(window, as_univariate=as_univariate)
 
-        inputs, target_columns, past_dynamic_columns, known_dynamic_columns = (
-            convert_fev_window_to_list_of_dicts_input(window=window, as_univariate=as_univariate)
+        num_variates = (
+            1
+            if as_univariate
+            else len(window.target_columns) + len(window.past_dynamic_columns) + len(window.known_dynamic_columns)
         )
-
-        num_variates: int = len(target_columns) + len(past_dynamic_columns) + len(known_dynamic_columns)
         if batch_size < num_variates:
             warnings.warn(
                 f"batch_size ({batch_size}) is smaller than num_variates ({num_variates}) in the task. "
@@ -963,48 +962,55 @@ class Chronos2Pipeline(BaseChronosPipeline):
             )
             batch_size = num_variates
 
-        start_time = time.monotonic()
+        # `predict_df` always produces the point forecast from the median, so it needs at least one
+        # quantile level; the task may request none (e.g. for point-forecast metrics).
+        predict_quantile_levels = quantile_levels if len(quantile_levels) > 0 else [0.5]
 
-        quantiles, mean = self.predict_quantiles(
-            inputs=inputs,
+        start_time = time.monotonic()
+        forecast_df = self.predict_df(
+            past_df,
+            future_df=future_df,
+            id_column=window.id_column,
+            timestamp_column=window.timestamp_column,
+            target=target,
             prediction_length=window.horizon,
-            quantile_levels=quantile_levels,
-            limit_prediction_length=False,
+            quantile_levels=predict_quantile_levels,
             batch_size=batch_size,
             **predict_kwargs,
         )
-        # since fev tasks are homogenous, we can safely stack the list of tensors into a single tensor
-        quantiles_np = torch.stack(quantiles).numpy()  # [n_tasks, n_variates, horizon, num_quantiles]
-        mean_np = torch.stack(mean).numpy()  # [n_tasks, n_variates, horizon]
-
         inference_time_s = time.monotonic() - start_time
 
-        multivariate_forecast: dict[str, dict[str, np.ndarray]] = {variate_name: {} for variate_name in target_columns}
-        # mean_np is actually the median here
-        point_forecast = mean_np  # [num_items, n_variates, horizon]
+        # `predict_df` orders rows as (item, target, step); `convert_forecast_df_to_predictions` inverts
+        # this back into one Dataset per target column. This also recombines the univariate splits when
+        # `as_univariate=True`, since those splits use the same (item, target, step) row ordering.
+        predictions = fev.utils.convert_forecast_df_to_predictions(
+            forecast_df,
+            horizon=window.horizon,
+            quantile_levels=quantile_levels,
+            target_columns=window.target_columns,
+        )
+        return predictions, inference_time_s
 
-        for v_idx, variate_name in enumerate(target_columns):
-            multivariate_forecast[variate_name]["predictions"] = point_forecast[:, v_idx]
+    @staticmethod
+    def _fev_window_to_dataframes(
+        window: "fev.EvaluationWindow", as_univariate: bool
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, str | list[str]]:
+        """Convert a fev window to the (past_df, future_df, target) inputs expected by `predict_df`."""
+        import fev
 
-        for q_idx, level in enumerate(quantile_levels):
-            for v_idx, variate_name in enumerate(target_columns):
-                multivariate_forecast[variate_name][str(level)] = quantiles_np[:, v_idx, :, q_idx]
-
-        predictions_dict: dict = {}
-        for variate_name in target_columns:
-            predictions_dict[variate_name] = datasets.Dataset.from_dict(
-                {
-                    k: multivariate_forecast[variate_name][k]
-                    for k in ["predictions"] + [str(q) for q in quantile_levels]
-                }
-            )
-        predictions = datasets.DatasetDict(predictions_dict)
-        predictions.set_format("numpy")
+        past_df, future_df, _ = fev.convert_input_data(window, adapter="pandas", as_univariate=as_univariate)
 
         if as_univariate:
-            predictions = fev.utils.combine_univariate_predictions_to_multivariate(predictions, window.target_columns)
-
-        return predictions, inference_time_s
+            # `as_univariate` splits each target into its own item but keeps covariate columns, which
+            # the univariate path ignores: keep only id, timestamp and the single "target" column.
+            target = "target"
+            past_df = past_df[[window.id_column, window.timestamp_column, target]]
+            future_df = None
+        else:
+            target = window.target_columns
+            if len(window.known_dynamic_columns) == 0:
+                future_df = None
+        return past_df, future_df, target
 
     def predict_fev(
         self,
@@ -1038,10 +1044,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
         inference_time_s
             Total time that it took to make predictions for all windows (in seconds)
         """
-        from chronos.chronos2.dataset import convert_fev_window_to_list_of_dicts_input
-
         try:
-            import fev
+            import fev  # noqa: F401
         except ImportError:
             raise ImportError("fev is required for predict_fev. Please install it with `pip install fev`.")
 
@@ -1049,11 +1053,23 @@ class Chronos2Pipeline(BaseChronosPipeline):
         if finetune_kwargs is not None:
             # only fine-tune the model on the first window
             first_window = task.get_window(0)
-            inputs, target_columns, past_dynamic_columns, known_dynamic_columns = (
-                convert_fev_window_to_list_of_dicts_input(window=first_window, as_univariate=as_univariate)
+            past_df, future_df, target = self._fev_window_to_dataframes(first_window, as_univariate=as_univariate)
+            inputs = from_dataframe(
+                past_df,
+                target_columns=[target] if isinstance(target, str) else target,
+                prediction_length=first_window.horizon,
+                future_df=future_df,
+                id_column=first_window.id_column,
+                timestamp_column=first_window.timestamp_column,
             )
 
-            num_variates: int = len(target_columns) + len(past_dynamic_columns) + len(known_dynamic_columns)
+            num_variates = (
+                1
+                if as_univariate
+                else len(first_window.target_columns)
+                + len(first_window.past_dynamic_columns)
+                + len(first_window.known_dynamic_columns)
+            )
             if batch_size < num_variates:
                 warnings.warn(
                     f"batch_size ({batch_size}) is smaller than num_variates ({num_variates}) in the task. "

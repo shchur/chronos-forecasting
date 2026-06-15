@@ -141,6 +141,7 @@ class BaseChronosPipeline(metaclass=PipelineRegistry):
         target: str = "target",
         prediction_length: int | None = None,
         quantile_levels: list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        batch_size: int = 32,
         validate_inputs: bool = True,
         freq: str | None = None,
         **predict_kwargs,
@@ -164,6 +165,8 @@ class BaseChronosPipeline(metaclass=PipelineRegistry):
             Number of steps to predict for each time series
         quantile_levels
             Quantile levels to compute
+        batch_size
+            The number of time series forecasted in a single forward pass, by default 32
         validate_inputs
             [ADVANCED] When True (default), validates dataframes before prediction. Setting to False removes the
             validation overhead, but may silently lead to wrong predictions if data is misformatted. When False, you
@@ -211,17 +214,22 @@ class BaseChronosPipeline(metaclass=PipelineRegistry):
             df, prediction_length, freq=freq, id_column=id_column, timestamp_column=timestamp_column
         )
 
-        # Generate forecasts
-        quantiles, mean = self.predict_quantiles(
-            inputs=context,
-            prediction_length=prediction_length,
-            quantile_levels=quantile_levels,
-            limit_prediction_length=False,
-            **predict_kwargs,
-        )
+        # Generate forecasts in batches to bound peak memory usage.
+        quantiles_batches = []
+        mean_batches = []
+        for start in range(0, len(context), batch_size):
+            quantiles, mean = self.predict_quantiles(
+                inputs=context[start : start + batch_size],
+                prediction_length=prediction_length,
+                quantile_levels=quantile_levels,
+                limit_prediction_length=False,
+                **predict_kwargs,
+            )
+            quantiles_batches.append(quantiles)
+            mean_batches.append(mean)
 
-        quantiles_np = quantiles.numpy()  # [n_series, horizon, num_quantiles]
-        mean_np = mean.numpy()  # [n_series, horizon]
+        quantiles_np = torch.cat(quantiles_batches).numpy()  # [n_series, horizon, num_quantiles]
+        mean_np = torch.cat(mean_batches).numpy()  # [n_series, horizon]
 
         # `future` and the predictions are both in df item order, so they align without reordering.
         data = {
